@@ -1,3 +1,4 @@
-# scdev_module
+# scdev Kernel Module
 
-A Simple Char DEVice kernel module. It has been tested on Ubuntu.
+A **S**imple **C**har **DEV**ice kernel module.
+It has been tested on Ubuntu.
