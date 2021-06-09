@@ -30,6 +30,9 @@ enum scdev_op {
 static DECLARE_KFIFO(cmds_fifo, unsigned char, FIFO_SIZE);
 static DECLARE_KFIFO(data_fifo, unsigned char, FIFO_SIZE);
 
+static DECLARE_WAIT_QUEUE_HEAD(scdev_cmds_wqueue);
+static DECLARE_WAIT_QUEUE_HEAD(scdev_data_wqueue);
+
 /*
  * We can:
  *
@@ -54,25 +57,38 @@ static ssize_t scdev_fifo_op(enum scdev_op op, char __user *buf, size_t count)
 {
 	int ret;
 	unsigned int copied;
+	bool was_empty, was_full;
 
 	switch(op) {
 	case READ_CMDS:
 		ret = kfifo_to_user(&cmds_fifo, buf, count, &copied);
 		break;
 	case WRITE_CMDS:
+		was_empty = kfifo_is_empty(&cmds_fifo);
 		ret = kfifo_from_user(&cmds_fifo, buf, count, &copied);
+
+		if (was_empty && !ret)
+			wake_up_interruptible(&scdev_cmds_wqueue);
+
 		break;
 	case READ_DATA:
+		was_full = kfifo_is_full(&data_fifo);
 		ret = kfifo_to_user(&data_fifo, buf, count, &copied);
+
+		if (was_full && !ret)
+			wake_up_interruptible(&scdev_data_wqueue);
+
 		break;
 	case WRITE_DATA:
 		ret = kfifo_from_user(&data_fifo, buf, count, &copied);
 		break;
 	default:
-		ret = -ERESTARTSYS;
+		ret = -EPERM;
 	}
 
-	printk(KERN_DEBUG "%s: Command %d: ret == %d, copied ==  %d", DEVICE_NAME, op, ret, copied);
+	printk(KERN_DEBUG "%s: Command %d: ret == %d, copied ==  %d",
+	       DEVICE_NAME, op, ret, copied);
+
 	return ret ? ret : copied;
 }
 
@@ -113,12 +129,20 @@ static int scdev_release(struct inode *inodep, struct file *filep)
 	return 0;
 }
 
-/*  [ cmds fifo ] <- Read from char dev */
 static ssize_t scdev_read(struct file *filep,
 			  char __user *buf,
 			  size_t count,
 			  loff_t *offset)
 {
+	if (kfifo_is_empty(&cmds_fifo)) {
+		if (filep->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		if (wait_event_interruptible(scdev_cmds_wqueue,
+					     !kfifo_is_empty(&cmds_fifo)))
+			return -ERESTARTSYS;
+	}
+
 	return scdev_fifo_op(READ_CMDS, buf, count);
 }
 
@@ -127,6 +151,15 @@ static ssize_t scdev_write(struct file *filep,
 			   size_t count,
 			   loff_t *offset)
 {
+	if (kfifo_is_full(&data_fifo)) {
+		if (filep->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		if (wait_event_interruptible(scdev_data_wqueue,
+					     !kfifo_is_full(&data_fifo)))
+			return -ERESTARTSYS;
+	}
+
 	return scdev_fifo_op(WRITE_DATA, (char __user *)buf, count);
 }
 
